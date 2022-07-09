@@ -30,14 +30,18 @@
 use std::ffi::CStr;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, Read, Result, Write};
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char, c_int, c_uint};
 use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 
-#[cfg(feature = "tokio")]
-pub mod async;
 
-extern "C" {
-    fn tuntap_setup(fd: c_int, name: *mut u8, mode: c_int, packet_info: c_int) -> c_int;
+#[cfg(target_os = "linux")]
+extern "C" {    
+    fn tuntap_setup(fd: c_int, name: *mut u8, mode: c_int, packet_info: c_int) -> c_int;    
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {    
+    fn tuntap_setup(num: c_uint) -> c_int;    
 }
 
 /// The mode in which open the virtual network adapter.
@@ -95,8 +99,43 @@ impl Iface {
     /// let mut buffer = vec![0; 1504]; // MTU + 4 for the header
     /// iface.recv(&mut buffer).unwrap();
     /// ```
+    
+    #[cfg(target_os = "linux")]
     pub fn new(ifname: &str, mode: Mode) -> Result<Self> {
         Iface::with_options(ifname, mode, true)
+    }
+
+    /// Creates a new virtual interface.
+    ///
+    /// # Parameters
+    ///
+    /// * `ifname`: The requested name of the virtual device. If left empty, the kernel will
+    ///   provide some reasonable, currently unused name. It also can contain `%d`, which will be
+    ///   replaced by a number to ensure the name is unused. Even if it isn't empty or doesn't
+    ///   contain `%d`, the actual name may be different (for example truncated to OS-dependent
+    ///   length). Use [`name`](#method.name) to find out the real name.
+    /// * `mode`: In which mode to create the device.
+    ///
+    /// # Errors
+    ///
+    /// This may fail for various OS-dependent reasons. However, two most common are:
+    ///
+    /// * The name is already taken.
+    /// * The process doesn't have the needed privileges (eg. `CAP_NETADM`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use tun_tap::*;
+    /// let iface = Iface::new(1).expect("Failed to create a TUN device");
+    /// let name = iface.name();
+    /// // Configure the device ‒ set IP address on it, bring it up.
+    /// let mut buffer = vec![0; 1504]; // MTU + 4 for the header
+    /// iface.recv(&mut buffer).unwrap();
+    /// ```
+    #[cfg(target_os = "macos")]
+    pub fn new(num: u32) -> Result<Self> {
+        Iface::with_options(num)
     }
     /// Creates a new virtual interface without the prepended packet info.
     ///
@@ -126,10 +165,13 @@ impl Iface {
     /// let mut buffer = vec![0; 1500]; // MTU
     /// iface.recv(&mut buffer).unwrap();
     /// ```
+    
+    #[cfg(target_os = "linux")]
     pub fn without_packet_info(ifname: &str, mode: Mode) -> Result<Self> {
         Iface::with_options(ifname, mode, false)
     }
 
+    #[cfg(target_os = "linux")]
     fn with_options(ifname: &str, mode: Mode, packet_info: bool) -> Result<Self> {
         let fd = OpenOptions::new()
             .read(true)
@@ -156,6 +198,25 @@ impl Iface {
         })
     }
 
+
+    #[cfg(target_os = "macos")]
+    fn with_options(num: u32) -> Result<Self> {
+        use std::os::unix::prelude::FromRawFd;
+
+        
+        let result = unsafe { tuntap_setup(num) };
+        if result < 0 {
+            return Err(Error::last_os_error());
+        }
+        let name = format!("utun{}", num);
+        let fd = unsafe { File::from_raw_fd(result) };
+        let mode = Mode::Tun;
+        Ok(Iface {
+            fd,
+            mode,
+            name,
+        })
+    }
     /// Returns the mode of the adapter.
     ///
     /// It is always the same as the one passed to [`new`](#method.new).
